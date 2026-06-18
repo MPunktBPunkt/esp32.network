@@ -1,83 +1,86 @@
-# esp32.network — Netzwerk-Scanner für ESP32
+# esp32.network
 
 ![Version](https://img.shields.io/badge/version-1.6.6-blue)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Donate](https://img.shields.io/badge/Donate-PayPal-00457C.svg?logo=paypal)](https://www.paypal.com/donate/?business=martin%40bchmnn.de&currency_code=EUR)
 
-> **Netzwerk-Scanner für ESP32** — Alle Teilnehmer im Heimnetz scannen, überwachen und benennen.
+> **Netzwerk-Scanner für ESP32** — Geräte im Heimnetz finden, überwachen und benennen. Integriert in ioBroker über [iobroker.esp-hub](https://github.com/MPunktBPunkt/iobroker.esp-hub).
+
+---
+
+## Überblick
+
+`esp32.network` scannt dein lokales Subnetz, erkennt aktive Geräte über mehrere TCP-Ports und hält ein persistentes Inventar mit Labels, Notizen und Online-Status. Optional werden stille Geräte über die **FritzBox TR-064-Schnittstelle** angereichert. Alles steuerbar über eine moderne Web-Oberfläche — und sichtbar im ESP-Hub-Dashboard.
 
 ---
 
 ## Features
 
-- 🌐 **Multi-Port-Scan** — prüft Ports 80, 8080, 8093, 443, 22, 23, 21 pro IP
-- ⏱️ **Auto-Scan** — konfigurierbares Intervall
-- 📊 **Live-Fortschritt** per SSE während des Scans
-- 🔍 **Ping** pro Gerät — 3x TCP, Min/Avg/Max/Loss
-- 🔌 **Port-Scanner** pro Gerät — 20 Standard-Ports, klickbare Links
-- 🏷️ **Label + Notiz** pro Gerät (persistent in NVS)
-- 🖥️ **Gerät-Typ-Icon** — Router/PC/ESP32/Phone/Printer/TV/NAS/Kamera/Switch
-- ⏳ **Uptime-Tracking** — Online seit / Offline seit
-- 🚀 **OTA-Update** — Browser Drag&Drop + ESP-Hub Push
-- 🤝 **ioBroker-Integration** — Heartbeat mit `devices` und `online` IO-Werten
-- 🔄 **Hub-Name Sync** — Umbenennung im ESP-Hub wird übernommen
+- **Multi-Port-Scan** — Ports 80, 8080, 8093, 443, 22, 23, 21 und mehr
+- **Auto-Scan** — konfigurierbares Intervall oder manuell
+- **Live-Fortschritt** — SSE während des Scans
+- **Ping & Port-Scanner** — pro Gerät mit klickbaren Links
+- **Geräte-Inventar** — Label, Notiz, Typ-Icon, Uptime-Tracking (NVS)
+- **FritzBox-Integration** — TR-064 Hostliste mergen (HTTPS Port 49443)
+- **ESP-Hub** — Heartbeat mit `devices` und `online` als IO-Werte, Name-Sync, OTA-Push
+- **Browser-OTA** — Firmware per Drag & Drop
 
 ---
 
-## Warum Multi-Port-Scan?
+## Voraussetzungen
 
-Geräte werden nur gefunden wenn sie auf **mindestens einem Port** antworten:
-
-| Gerät | Port | Vorher | Jetzt |
-|-------|------|--------|-------|
-| HTTP-Geräte | 80 | ✅ | ✅ |
-| ioBroker/ESP-Hub | 8093 | ❌ | ✅ |
-| Andere Web-UIs | 8080 | ❌ | ✅ |
-| HTTPS | 443 | ❌ | ✅ |
-| SSH/Linux | 22 | ❌ | ✅ |
-| Telnet | 23 | ❌ | ✅ |
+| Typ | Details |
+|-----|---------|
+| **Board** | ESP32 (getestet: Wemos D1 Mini ESP32) |
+| **WiFiManager** | tablatronix / tzapu |
+| **ArduinoJson** | bblanchon v6 oder v7 |
+| **ioBroker** | [iobroker.esp-hub](https://github.com/MPunktBPunkt/iobroker.esp-hub) auf Port **8093** |
 
 ---
 
 ## Quickstart
 
-1. Sketch flashen
-2. Mit WLAN-Hotspot **"ESP-Net-Setup"** verbinden
-3. WLAN + ESP-Hub IP eingeben
-4. `http://<ESP-IP>/` öffnen → Scan starten
+1. `esp32.network.ino` in der Arduino IDE öffnen
+2. Optional im Sketch anpassen: `DEVICE_NAME`, `HUB_HOST`, `HUB_PORT`
+3. Auf ESP32 flashen
+4. Mit WLAN-Hotspot **`ESP-Net-Setup`** verbinden → WLAN + Hub-IP eingeben
+5. Web-UI öffnen: `http://<ESP-IP>/` → Scan starten
+6. Gerät erscheint im ESP-Hub unter `http://<ioBroker-IP>:8093`
+
+> **WLAN zurücksetzen:** BOOT-Taste (GPIO0) beim Einschalten 3 Sekunden halten
 
 ---
 
-## Einstellungen
+## Konfiguration
 
 | Parameter | Standard | Beschreibung |
-|-----------|----------|-------------|
-| Scan-Intervall | 5 min | 0 = nur manuell |
-| Ping-Timeout | 300 ms | pro Port, 100–2000ms |
-| Subnetz-Basis | auto | z.B. `192.168.178` |
+|-----------|----------|--------------|
+| Scan-Intervall | 30 s | 0 = nur manuell |
+| Ping-Timeout | 300 ms | pro Port (100–2000 ms) |
+| Subnetz-Basis | auto | z. B. `192.168.178` |
+| FritzBox Host/User/Pass | leer | optional, TR-064 Pull |
+| Hub-Port | 8093 | ESP-Hub Adapter |
+
+---
+
+## ioBroker-Integration (ESP-Hub)
+
+Der Scanner sendet regelmäßig einen Heartbeat an `POST /api/register`:
+
+```
+esp-hub.0.devices.<MAC>/
+├── name, ip, version, rssi, uptime, freeHeap
+└── ios/
+    ├── devices   ← Anzahl erkannter Geräte
+    └── online    ← aktuell online
+```
+
+Dashboard: `http://<ioBroker-IP>:8093`
 
 ---
 
 ## Lizenz
 
-GNU General Public License v3.0 — © MPunktBPunkt
+GNU General Public License v3.0 © MPunktBPunkt — siehe [LICENSE](LICENSE)
 
 [![Donate](https://img.shields.io/badge/Donate-PayPal-00457C.svg?logo=paypal)](https://www.paypal.com/donate/?business=martin%40bchmnn.de&currency_code=EUR)
-
----
-
-## Changelog
-
-### 1.2.0
-- Fix: Multi-Port-Scan (80, 8080, 8093, 443, 22, 23, 21) — findet deutlich mehr Geräte
-- Fix: Hostname "-" statt `&#x2013;` HTML-Entity
-- Neu: Hub-Name Sync aus Heartbeat-Response
-- Neu: Subnetz wird automatisch aus WLAN-IP ermittelt
-
-### 1.1.0
-- Neu: Ping pro Gerät (3x TCP, Min/Avg/Max/Loss)
-- Neu: Port-Scanner pro Gerät (20 Ports)
-- Neu: Gerät-Typ-Icons, Notizen, Uptime-Tracking
-
-### 1.0.0
-- Erstveröffentlichung
