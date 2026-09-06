@@ -53,8 +53,12 @@
 
 ## Vorkompilierte Firmware
 
-Noch keine `.bin` im Repo. Schema für künftige Builds: `{name}.{version}.{family}.bin`  
-(z. B. `network.1.6.6.esp32.bin` / `network.1.6.6.esp32s3.bin`)
+Schema: `{name}.{version}.{family}.bin`
+
+| Datei | Board |
+|-------|-------|
+| `network.1.6.6.esp32.bin` | ESP32 / D1 Mini |
+| `network.1.6.6.esp32s3.bin` | ESP32-S3 |
 
 ---
 
