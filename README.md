@@ -51,6 +51,13 @@
 
 ---
 
+## Vorkompilierte Firmware
+
+Noch keine `.bin` im Repo. Schema für künftige Builds: `{name}.{version}.{family}.bin`  
+(z. B. `network.1.6.6.esp32.bin` / `network.1.6.6.esp32s3.bin`)
+
+---
+
 ## Konfiguration
 
 | Parameter | Standard | Beschreibung |
