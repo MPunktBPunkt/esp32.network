@@ -1,0 +1,55 @@
+<!DOCTYPE html><html lang='de'><head><meta charset='UTF-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>OTA</title><style>
+*{box-sizing:border-box;margin:0;padding:0}body{background:#07090f;color:#dde6f0;font-family:sans-serif;font-size:14px}
+header{background:#0d1422;border-bottom:1px solid #1a2d47;padding:14px 20px}
+h1{font-size:18px;color:#00c8ff}
+.tabs{display:flex;background:#0d1422;border-bottom:1px solid #1a2d47;padding:0 20px}
+.tab{padding:10px 20px;color:#4a6380;text-decoration:none;font-weight:600;border-bottom:2px solid transparent}
+.tab.a,.tab:hover{color:#00c8ff;border-bottom-color:#00c8ff}
+.c{padding:20px;max-width:700px}.k{background:#0d1422;border:1px solid #1a2d47;border-radius:8px;padding:20px;margin-bottom:14px}
+.k h3{font-size:11px;color:#4a6380;text-transform:uppercase;letter-spacing:.5px;margin-bottom:16px}
+.drop{border:2px dashed #1a2d47;border-radius:8px;padding:32px;text-align:center;cursor:pointer;color:#4a6380}
+.drop:hover{border-color:#00c8ff;color:#dde6f0}input[type=file]{display:none}
+.btn{background:#00c8ff;color:#000;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:700;margin-top:14px;width:100%}
+.bar{height:8px;background:#1a2d47;border-radius:4px;overflow:hidden;margin-top:12px}
+.bf{height:100%;background:#00c8ff;border-radius:4px;width:0%;transition:width .3s}
+.msg{margin-top:10px;font-size:13px;color:#4a6380;text-align:center}
+.w{background:rgba(255,200,68,.08);border:1px solid rgba(255,200,68,.25);border-radius:6px;padding:12px;color:#ffc844;font-size:13px;margin-bottom:14px}
+</style></head><body>
+<header><h1>&#128225; Network Scanner</h1></header>
+<div class='tabs'><a class='tab' href='/'>&#127760; Netzwerk</a><a class='tab a' href='/ota'>&#128640; OTA</a></div>
+<div class='c'><div class='k'><h3>Firmware hochladen</h3>
+<div class='w'>&#9888; ESP startet nach dem Flash automatisch neu.</div>
+<div class='drop' id='drop' onclick='document.getElementById("fw").click()'>&#128193; <b>.bin</b> ablegen oder klicken</div>
+<input type='file' id='fw' accept='.bin'>
+<div id='fn' style='margin-top:8px;font-size:12px;color:#4a6380;text-align:center'></div>
+<button class='btn' onclick='go()'>&#9889; Flashen</button>
+<div id='prog' style='display:none'><div class='bar'><div class='bf' id='bar'></div></div><div class='msg' id='msg'>...</div></div>
+</div></div>
+<script>
+var inp=document.getElementById('fw'),drop=document.getElementById('drop');
+inp.onchange=function(){if(inp.files[0])document.getElementById('fn').textContent=inp.files[0].name+' ('+Math.round(inp.files[0].size/1024)+' KB)';};
+drop.ondragover=function(e){e.preventDefault();drop.style.borderColor='#00c8ff';};
+drop.ondragleave=function(){drop.style.borderColor='#1a2d47';};
+drop.ondrop=function(e){e.preventDefault();drop.style.borderColor='#1a2d47';
+  var f=e.dataTransfer.files[0];if(f&&f.name.endsWith('.bin')){
+    var dt=new DataTransfer();dt.items.add(f);inp.files=dt.files;
+    document.getElementById('fn').textContent=f.name+' ('+Math.round(f.size/1024)+' KB)';}};
+function go(){if(!inp.files[0]){alert('Bitte .bin auswaehlen!');return;}
+  var fd=new FormData();fd.append('firmware',inp.files[0]);
+  var xhr=new XMLHttpRequest();xhr.open('POST','/ota-upload');
+  document.getElementById('prog').style.display='block';
+  xhr.upload.onprogress=function(e){if(e.lengthComputable){
+    var p=Math.round(e.loaded/e.total*100);
+    document.getElementById('bar').style.width=p+'%';
+    document.getElementById('msg').textContent='Hochladen: '+p+'%';}};
+  xhr.onload=function(){if(xhr.status===200){
+    document.getElementById('bar').style.width='100%';
+    document.getElementById('bar').style.background='#20d68a';
+    document.getElementById('msg').textContent='OK - ESP startet neu...';
+  }else{document.getElementById('msg').textContent='Fehler: '+xhr.responseText;
+    document.getElementById('bar').style.background='#ff4d6a';}};
+  xhr.send(fd);
+}
+</script></body></html>

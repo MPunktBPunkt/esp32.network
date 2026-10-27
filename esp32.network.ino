@@ -14,10 +14,18 @@
 #include <lwip/etharp.h>
 #include <fcntl.h>
 #include <esp_system.h>
+#include "esphub/HardwareInfo.h"
+#include "esphub/CpuLoad.h"
+#include "web/UiPages.h"
 
 // ================================================================
 //  KONFIGURATION
 // ================================================================
+// v1.7.0: esp-hub-base Shared-Core Stufe A/B (Validierung)
+//  - HardwareInfo + CpuLoad aus ESP32.esp-hub 1.10.5 (src/esphub/)
+//  - Web-UI: web/index.html + web/ota.html → gzip-PROGMEM (pack_ui.py)
+//  - /api/status + Heartbeat: version, hwSummary, cpu*, flash*, module
+//  - Hub-Rename (reply.name) unveraendert
 // v1.6.6: Typheuristik erweitert (Review 4)
 //  - Neue Hostname-Muster fuer Geraete die mit FritzBox-Namen
 //    jetzt oft gut benannt sind, aber noch als "Unknown" landeten:
@@ -87,7 +95,7 @@
 //  - Erweitertes Typmodell (Tablet/Speaker/SmartPlug/Vacuum/
 //    Bridge/Repeater/Server), Amazon/Google/Nest -> Speaker
 #define DEVICE_NAME           "Network Scanner"
-#define FW_VERSION            "1.6.6"
+#define FW_VERSION            "1.7.0"
 #define HUB_HOST              "192.168.178.113"
 #define HUB_PORT              8093
 #define WIFI_AP_NAME          "ESP-Net-Setup"
@@ -185,6 +193,7 @@ WiFiManager   wifiManager;
 WebServer     webServer(80);
 
 String        deviceName        = DEVICE_NAME;
+HardwareInfo hwInfo;
 String        hubHost           = HUB_HOST;
 int           hubPort           = HUB_PORT;
 unsigned long lastHeartbeat     = 0;
@@ -1695,18 +1704,29 @@ void handleApiFritzboxNow() {
 void handleApiStatus() {
     unsigned long up=millis()/1000UL;
     int active=0; for(int i=0;i<devCount;i++) if(devs[i].active) active++;
-    String j="{\"name\":\""+escJ(deviceName.c_str())+"\","
-             "\"chip\":\""+escJ(ESP.getChipModel())+"\","
-             "\"mac\":\""+getMac()+"\","
-             "\"ip\":\""+getLocalIp()+"\","
-             "\"uptime\":"+String(up)+","
-             "\"freeHeap\":"+String(ESP.getFreeHeap())+","
-             "\"subnet\":\""+subnetBase+"\","
-             "\"devices\":"+String(devCount)+","
-             "\"online\":"+String(active)+","
-             "\"ringIp\":"+String(ringIp)+","
-             "\"timeout\":"+String(scanTimeoutMs)+","
-             "\"rlog\":["+buildRingLog()+"]}";
+    String j="{";
+    j += "\"name\":\""+escJ(deviceName.c_str())+"\"";
+    j += ",\"version\":\"" FW_VERSION "\"";
+    j += ",\"chip\":\""+escJ(hwInfo.chipModel().c_str())+"\"";
+    j += ",\"mac\":\""+getMac()+"\"";
+    j += ",\"ip\":\""+getLocalIp()+"\"";
+    j += ",\"rssi\":"+String(WiFi.RSSI());
+    j += ",\"uptime\":"+String(up);
+    j += ",\"heap\":"+String(hwInfo.freeHeap());
+    j += ",\"freeHeap\":"+String(hwInfo.freeHeap());
+    j += ",\"psram\":"+String(hwInfo.freePsram());
+    j += ",\"psramSize\":"+String(hwInfo.psramSize());
+    j += ",\"sketch\":"+String(hwInfo.freeSketchSpace());
+    j += ",\"hub\":\""+hubHost+":"+String(hubPort)+"\"";
+    j += ",\"interval\":"+String(heartbeatInterval/1000UL);
+    j += ",\"subnet\":\""+subnetBase+"\"";
+    j += ",\"devices\":"+String(devCount);
+    j += ",\"online\":"+String(active);
+    j += ",\"ringIp\":"+String(ringIp);
+    j += ",\"timeout\":"+String(scanTimeoutMs);
+    hwInfo.appendStatusFields(j);
+    CpuLoad::appendStatusFields(j);
+    j += ",\"rlog\":["+buildRingLog()+"]}";
     webServer.send(200,"application/json",j);
 }
 
@@ -1734,635 +1754,15 @@ String buildRingLog() {
 //  WEB UI (handleRoot)
 // ================================================================
 void handleRoot() {
-    // Streaming-Ausgabe: webServer.send() mit grossem String
-    // liefert auf dem ESP32 WebServer nur ~16KB aus (schneidet
-    // den Script-Block ab). Loesung: 4 Chunks per sendContent().
-    String html; html.reserve(14000);
-    webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
-    webServer.sendHeader("Content-Type", "text/html");
-    webServer.sendHeader("Cache-Control", "no-cache");
-    webServer.send(200, "text/html", "");
-
-    // ── Chunk 1: DOCTYPE + CSS ──────────────────────────────────
-    html += F("<!DOCTYPE html><html lang='de'><head>\n");
-    html += F("<meta charset='UTF-8'>\n");
-    html += F("<meta name='viewport' content='width=device-width,initial-scale=1'>\n");
-    html += F("<title>Network Scanner</title>\n");
-    html += F("<style>\n");
-    html += F(":root{--bg:#07090f;--surf:#0d1422;--card:#111c2e;--brd:#1a2d47;\n");
-    html += F("  --acc:#00c8ff;--acc2:#0088bb;--grn:#20d68a;--red:#ff4d6a;\n");
-    html += F("  --ylw:#ffc844;--pur:#a78bfa;--txt:#dde6f0;--mut:#4a6380;\n");
-    html += F("  --mono:'Courier New',monospace;}\n");
-    html += F("*{box-sizing:border-box;margin:0;padding:0}\n");
-    html += F("body{background:var(--bg);color:var(--txt);font-family:'Segoe UI',system-ui,sans-serif;font-size:13px}\n");
-    html += F("body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;\n");
-    html += F("  background:radial-gradient(ellipse 80% 50% at 50% -10%,rgba(0,200,255,.07),transparent);}\n");
-    html += F("header{position:relative;z-index:10;background:rgba(13,20,34,.95);\n");
-    html += F("  border-bottom:1px solid var(--brd);padding:10px 18px;\n");
-    html += F("  display:flex;align-items:center;gap:10px;flex-wrap:wrap;}\n");
-    html += F(".logo{font-size:22px;line-height:1}\n");
-    html += F("header h1{font-size:15px;font-weight:700;color:var(--acc)}\n");
-    html += F(".badge{background:rgba(0,200,255,.1);color:var(--acc);border:1px solid rgba(0,200,255,.2);\n");
-    html += F("  padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;}\n");
-    html += F(".badge-g{background:rgba(32,214,138,.1);color:var(--grn);border-color:rgba(32,214,138,.25)}\n");
-    html += F(".badge-d{background:rgba(74,99,128,.15);color:var(--mut);border-color:rgba(74,99,128,.3)}\n");
-    html += F(".hdr-r{margin-left:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap}\n");
-    html += F(".tabs{position:relative;z-index:9;display:flex;background:rgba(13,20,34,.9);\n");
-    html += F("  border-bottom:1px solid var(--brd);padding:0 18px;gap:2px;}\n");
-    html += F(".tab{padding:10px 14px;cursor:pointer;border:none;background:none;color:var(--mut);\n");
-    html += F("  font-size:12px;font-weight:600;border-bottom:2px solid transparent;transition:color .15s;}\n");
-    html += F(".tab:hover{color:var(--txt)}.tab.active{color:var(--acc);border-bottom-color:var(--acc)}\n");
-    html += F(".pane{display:none;position:relative;z-index:1;padding:16px;max-width:1300px}\n");
-    html += F(".pane.active{display:block}\n");
-    html += F(".stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:8px;margin-bottom:14px}\n");
-    html += F(".sc{background:var(--card);border:1px solid var(--brd);border-radius:8px;padding:10px;text-align:center}\n");
-    html += F(".sv{font-size:24px;font-weight:800;color:var(--acc);font-family:var(--mono)}\n");
-    html += F(".sl{font-size:10px;color:var(--mut);margin-top:3px;text-transform:uppercase;letter-spacing:.5px}\n");
-    html += F(".tbl-wrap{background:var(--surf);border:1px solid var(--brd);border-radius:10px;overflow:hidden}\n");
-    html += F(".tbl-hdr{padding:10px 14px;border-bottom:1px solid var(--brd);display:flex;align-items:center;gap:8px;flex-wrap:wrap;}\n");
-    html += F(".tbl-hdr h3{font-size:12px;font-weight:700;letter-spacing:.3px}\n");
-    html += F("table{width:100%;border-collapse:collapse}\n");
-    html += F("th{text-align:left;padding:8px 10px;font-size:10px;font-weight:700;text-transform:uppercase;\n");
-    html += F("  letter-spacing:.6px;color:var(--mut);background:rgba(0,0,0,.25);border-bottom:1px solid var(--brd);}\n");
-    html += F("td{padding:0;border-bottom:1px solid rgba(26,45,71,.5);vertical-align:top}\n");
-    html += F("tr:last-child td{border-bottom:none}\n");
-    html += F("tr.off-row{opacity:.45}\n");
-    html += F("tr:hover .mri{background:rgba(0,200,255,.025)}\n");
-    html += F(".mri{padding:9px 10px;display:flex;align-items:center;cursor:pointer;min-height:44px}\n");
-    html += F(".di{width:28px;height:28px;flex-shrink:0;border-radius:6px;font-size:14px;\n");
-    html += F("  display:flex;align-items:center;justify-content:center;\n");
-    html += F("  background:rgba(0,200,255,.08);border:1px solid rgba(0,200,255,.12);\n");
-    html += F("  cursor:pointer;transition:all .15s;margin-right:8px;}\n");
-    html += F(".di:hover{background:rgba(0,200,255,.2);transform:scale(1.1)}\n");
-    html += F(".dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-right:6px}\n");
-    html += F(".don{background:var(--grn);box-shadow:0 0 5px var(--grn)}\n");
-    html += F(".dof{background:var(--mut)}\n");
-    html += F(".ipv{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--acc);margin-right:8px;white-space:nowrap}\n");
-    html += F(".inf{flex:1;min-width:0}\n");
-    html += F(".inm{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n");
-    html += F(".ins{font-size:11px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}\n");
-    html += F(".vendor-badge{display:inline-block;background:rgba(167,139,250,.12);color:var(--pur);\n");
-    html += F("  border:1px solid rgba(167,139,250,.2);border-radius:4px;padding:1px 6px;font-size:10px;margin-left:4px;}\n");
-    html += F(".upc{padding:9px 10px;font-size:11px;color:var(--mut);display:flex;align-items:center}\n");
-    html += F(".uon{color:var(--grn);font-weight:600}.uof{color:var(--red);font-weight:600}\n");
-    html += F(".rac{display:flex;align-items:center;gap:3px;padding:7px 6px;white-space:nowrap}\n");
-    html += F(".btn{display:inline-flex;align-items:center;gap:3px;padding:4px 9px;border-radius:4px;\n");
-    html += F("  border:none;cursor:pointer;font-size:11px;font-weight:700;transition:all .15s;white-space:nowrap;background:none;}\n");
-    html += F(".btn:disabled{opacity:.4;cursor:not-allowed}\n");
-    html += F(".bp{background:rgba(0,200,255,.1);color:var(--acc);border:1px solid rgba(0,200,255,.2)}\n");
-    html += F(".bp:hover:not(:disabled){background:rgba(0,200,255,.22)}\n");
-    html += F(".bq{background:rgba(167,139,250,.1);color:var(--pur);border:1px solid rgba(167,139,250,.2)}\n");
-    html += F(".bq:hover:not(:disabled){background:rgba(167,139,250,.22)}\n");
-    html += F(".bx{color:var(--mut);border:1px solid transparent}\n");
-    html += F(".bx:hover{color:var(--red);border-color:rgba(255,77,106,.3)}\n");
-    html += F(".bs{background:rgba(32,214,138,.12);color:var(--grn);border:1px solid rgba(32,214,138,.2)}\n");
-    html += F(".bs:hover{background:rgba(32,214,138,.25)}\n");
-    html += F(".bpr{background:var(--acc);color:#000;border:1px solid var(--acc)}\n");
-    html += F(".bpr:hover:not(:disabled){background:#33d6ff}\n");
-    html += F(".blg{padding:7px 16px;font-size:13px}\n");
-    html += F(".erow td{padding:0}.epnl{display:none;background:rgba(0,0,0,.3);\n");
-    html += F("  border-top:1px solid var(--brd);padding:14px;}\n");
-    html += F(".epnl.open{display:block}\n");
-    html += F(".egrid{display:grid;grid-template-columns:1fr 1fr;gap:16px}\n");
-    html += F("@media(max-width:700px){.egrid{grid-template-columns:1fr}}\n");
-    html += F(".fg{margin-bottom:10px}\n");
-    html += F(".fg label{display:block;font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}\n");
-    html += F(".fi{width:100%;background:var(--bg);border:1px solid var(--brd);color:var(--txt);\n");
-    html += F("  border-radius:5px;padding:6px 9px;font-size:12px;font-family:inherit;}\n");
-    html += F(".fi:focus{outline:none;border-color:var(--acc)}\n");
-    html += F("textarea.fi{resize:vertical;min-height:54px}\n");
-    html += F(".dp{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}\n");
-    html += F(".dopt{padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;\n");
-    html += F("  background:var(--card);border:1px solid var(--brd);transition:all .15s;white-space:nowrap;}\n");
-    html += F(".dopt:hover{border-color:var(--acc);color:var(--acc)}\n");
-    html += F(".dopt.sel{background:rgba(0,200,255,.15);border-color:var(--acc);color:var(--acc)}\n");
-    html += F(".pbox{background:var(--card);border:1px solid var(--brd);border-radius:7px;padding:12px;margin-top:7px}\n");
-    html += F(".prow{display:flex;gap:8px;flex-wrap:wrap}\n");
-    html += F(".ps{text-align:center;flex:1;min-width:40px}\n");
-    html += F(".psv{font-family:var(--mono);font-size:18px;font-weight:800}\n");
-    html += F(".psv.ok{color:var(--grn)}.psv.warn{color:var(--ylw)}.psv.bad{color:var(--red)}\n");
-    html += F(".psl{font-size:10px;color:var(--mut);margin-top:2px;text-transform:uppercase}\n");
-    html += F(".pchips{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}\n");
-    html += F(".pco{padding:3px 8px;border-radius:4px;font-size:11px;font-family:var(--mono);\n");
-    html += F("  display:inline-flex;align-items:center;gap:2px;border:1px solid;text-decoration:none;}\n");
-    html += F(".pco-o{background:rgba(32,214,138,.1);color:var(--grn);border-color:rgba(32,214,138,.2)}\n");
-    html += F(".pco-o:hover{background:rgba(32,214,138,.22)}\n");
-    html += F(".pco-c{background:rgba(26,45,71,.3);color:var(--mut);border-color:rgba(26,45,71,.5)}\n");
-    html += F(".ssep td{padding:5px 12px;font-size:10px;text-transform:uppercase;letter-spacing:.7px;\n");
-    html += F("  color:var(--mut);background:rgba(0,0,0,.2);border-bottom:1px solid var(--brd);}\n");
-    html += F(".card{background:var(--surf);border:1px solid var(--brd);border-radius:9px;padding:16px;margin-bottom:14px}\n");
-    html += F(".card h3{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);margin-bottom:12px}\n");
-    html += F(".sr{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--brd)}\n");
-    html += F(".sr:last-child{border-bottom:none}\n");
-    html += F(".sl2{flex:1}.sl2 b{display:block;font-size:13px;color:var(--txt);margin-bottom:2px}\n");
-    html += F(".sl2 span{font-size:11px;color:var(--mut)}\n");
-    html += F(".si{background:var(--bg);border:1px solid var(--brd);color:var(--txt);\n");
-    html += F("  border-radius:5px;padding:6px 10px;font-size:12px;width:110px;text-align:right;}\n");
-    html += F(".si:focus{outline:none;border-color:var(--acc)}\n");
-    // Event Log styles
-    html += F(".evlist{max-height:420px;overflow-y:auto}\n");
-    html += F(".evitem{display:flex;align-items:center;gap:8px;padding:7px 12px;\n");
-    html += F("  border-bottom:1px solid rgba(26,45,71,.5);font-size:12px;}\n");
-    html += F(".evitem:last-child{border-bottom:none}\n");
-    html += F(".ev-t{font-family:var(--mono);font-size:10px;color:var(--mut);min-width:70px}\n");
-    html += F(".ev-NEW{color:var(--ylw)}.ev-ONLINE{color:var(--grn)}.ev-OFFLINE{color:var(--red)}.ev-IPCHG{color:var(--pur)}\n");
-    html += F(".ev-ip{font-family:var(--mono);color:var(--acc);flex:1}\n");
-    html += F(".ev-inf{font-size:11px;color:var(--mut)}\n");
-    html += F(".ring-bar{height:3px;background:var(--brd);border-radius:2px;overflow:hidden;margin-bottom:12px}\n");
-    html += F(".ring-fill{height:100%;background:linear-gradient(90deg,var(--acc2),var(--acc));transition:width .5s}\n");
-    html += F(".toast{position:fixed;bottom:18px;right:18px;z-index:100;background:var(--card);\n");
-    html += F("  border:1px solid var(--acc);color:var(--txt);padding:8px 14px;border-radius:7px;\n");
-    html += F("  font-size:12px;opacity:0;transition:opacity .3s;pointer-events:none;}\n");
-    html += F(".toast.show{opacity:1}\n");
-    html += F("@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}\n");
-    html += F(".spin{animation:pulse 1s infinite}\n");
-    html += F(".fbar{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;}\n");
-    html += F(".fbtn{padding:4px 11px;border-radius:20px;border:1px solid var(--brd);background:var(--card);\n");
-    html += F("  color:var(--mut);cursor:pointer;font-size:11px;font-weight:600;transition:all .15s;}\n");
-    html += F(".fbtn:hover,.fbtn.act{background:rgba(0,200,255,.12);color:var(--acc);border-color:rgba(0,200,255,.3)}\n");
-    html += F("</style></head><body>\n");
-    // Header
-    webServer.sendContent(html); html = "";
-
-    // ── Chunk 2: Body / Panes ───────────────────────────────────
-    html += F("<header>\n");
-    html += F("<div class='logo'>&#128225;</div>\n");
-    html += F("<h1>Network Scanner</h1>\n");
-    html += F("<span class='badge'>v");
-    html += F(FW_VERSION);
-    html += F("</span>\n");
-    html += F("<div class='hdr-r'>\n");
-    html += F("<span class='badge badge-d' id='ring-status'>Ring-Scan</span>\n");
-    html += F("<span class='badge badge-g'>");
-    html += getLocalIp();
-    html += F("</span>\n");
-    html += F("</div></header>\n");
-    // Tabs
-    html += F("<div class='tabs'>\n");
-    html += F("<button class='tab active' onclick=\"showTab('pane-net',this)\">&#127760; Netzwerk</button>\n");
-    html += F("<button class='tab' onclick=\"showTab('pane-events',this)\">&#128203; Events</button>\n");
-    html += F("<button class='tab' onclick=\"showTab('pane-settings',this)\">&#9881; Einstellungen</button>\n");
-    html += F("<button class='tab' onclick=\"showTab('pane-status',this)\">&#128202; Status</button>\n");
-    html += F("<button class='tab' onclick=\"window.location='/ota'\">&#128640; OTA</button>\n");
-    html += F("</div>\n");
-    // Netzwerk Pane
-    html += F("<div class='pane active' id='pane-net'>\n");
-    html += F("<div class='ring-bar'><div class='ring-fill' id='ring-fill' style='width:0%'></div></div>\n");
-    html += F("<div id='rlog' style='font-size:11px;font-family:var(--mono);color:var(--mut);background:rgba(0,0,0,.2);border-radius:6px;padding:6px 10px;margin-bottom:10px;line-height:1.7'>Lade...</div>\n");
-    html += F("<div class='stat-grid'>\n");
-    html += F("<div class='sc'><div class='sv' id='s-total'>-</div><div class='sl'>Gesamt</div></div>\n");
-    html += F("<div class='sc'><div class='sv' style='color:var(--grn)' id='s-active'>-</div><div class='sl'>Online</div></div>\n");
-    html += F("<div class='sc'><div class='sv' style='color:var(--mut)' id='s-inactive'>-</div><div class='sl'>Offline</div></div>\n");
-    html += F("<div class='sc'><div class='sv' style='font-size:13px;padding-top:5px' id='s-subnet'>-</div><div class='sl'>Subnetz</div></div>\n");
-    html += F("</div>\n");
-    html += F("<div class='fbar'>\n");
-    html += F("<button class='fbtn act' id='fb-all' onclick=\"setFilter('all')\">Alle</button>\n");
-    html += F("<button class='fbtn' id='fb-on' onclick=\"setFilter('on')\">Online</button>\n");
-    html += F("<button class='fbtn' id='fb-off' onclick=\"setFilter('off')\">Offline</button>\n");
-    html += F("<button class='fbtn' id='fb-new' onclick=\"setFilter('new')\">Neu (&lt;24h)</button>\n");
-    html += F("</div>\n");
-    html += F("<div class='tbl-wrap'>\n");
-    html += F("<div class='tbl-hdr'><h3>Netzwerkteilnehmer</h3>\n");
-    html += F("<span style='font-size:11px;color:var(--mut)' id='tbl-cnt'></span>\n");
-    html += F("<span style='margin-left:auto;font-size:11px;color:var(--mut)'>Zeile klicken - Typ-Icon zum Aendern</span>\n");
-    html += F("</div>\n");
-    html += F("<table><thead><tr>\n");
-    html += F("<th style='width:38px'>Typ</th><th style='width:16px'></th>\n");
-    html += F("<th>IP</th><th>Geraet / Hersteller</th>\n");
-    html += F("<th>Online/Offline seit</th>\n");
-    html += F("<th style='width:140px'>Aktionen</th>\n");
-    html += F("</tr></thead>\n");
-    html += F("<tbody id='net-tbody'></tbody></table></div></div>\n");
-    // Events Pane
-    html += F("<div class='pane' id='pane-events'>\n");
-    html += F("<div class='card'>\n");
-    html += F("<h3>Ereignis-Log (nur Statusaenderungen)</h3>\n");
-    html += F("<div class='evlist' id='ev-list'><div style='color:var(--mut);padding:20px;text-align:center'>Lade...</div></div>\n");
-    html += F("</div></div>\n");
-    // Settings Pane
-    html += F("<div class='pane' id='pane-settings'>\n");
-    html += F("<div class='card'><h3>Scan-Einstellungen</h3>\n");
-    html += F("<div class='sr'><div class='sl2'><b>Probe-Timeout</b><span>TCP-Connect Timeout pro Port (ms)</span></div>\n");
-    html += F("<input type='number' class='si' id='cfg-to' min='50' max='2000'> ms</div>\n");
-    html += F("<div class='sr'><div class='sl2'><b>Subnetz-Basis</b><span>Leer = automatisch aus WLAN-IP</span></div>\n");
-    html += F("<input type='text' class='si' id='cfg-sub' placeholder='192.168.178' style='width:145px'></div>\n");
-    html += F("<div class='card' style='margin-top:10px;background:rgba(0,200,255,.04)'>\n");
-    html += F("<b style='color:var(--acc)'>FastScan-Ports:</b> 80, 443, 22, 53, 8093, 8080, 445, 139, 554, 9100<br>\n");
-    html += F("<span style='font-size:11px;color:var(--mut)'>Geraet gilt als online wenn mind. 1 Port antwortet. Bestaetigte Geraete pruefen zusaetzlich frueher offene Ports + Consumer-Ports (8008/8009/8443/8888). Ring-Scan: 1 IP pro Tick, laeuft permanent.</span>\n");
-    html += F("</div></div>\n");
-    // FritzBox-Integration (v1.6.0)
-    html += F("<div class='card'><h3>&#127968; FritzBox-Integration (TR-064)</h3>\n");
-    html += F("<div class='sr'><div class='sl2'><b>Aktiviert</b><span>Periodischer Pull der FritzBox-Geraeteliste - findet auch Geraete ohne offene TCP-Ports (Echo, Handy, Tablet, ...)</span></div>\n");
-    html += F("<input type='checkbox' id='frb-en' style='width:20px;height:20px'></div>\n");
-    html += F("<div class='sr'><div class='sl2'><b>FritzBox-Adresse</b><span>Leer = &lt;Subnetz&gt;.1</span></div>\n");
-    html += F("<input type='text' class='si' id='frb-host' placeholder='192.168.178.1' style='width:145px'></div>\n");
-    html += F("<div class='sr'><div class='sl2'><b>Benutzername</b><span>Nur falls TR-064 Login erfordert</span></div>\n");
-    html += F("<input type='text' class='si' id='frb-user' style='width:145px'></div>\n");
-    html += F("<div class='sr'><div class='sl2'><b>Kennwort</b><span id='frb-pass-hint'>Nur falls TR-064 Login erfordert</span></div>\n");
-    html += F("<input type='password' class='si' id='frb-pass' placeholder='unveraendert' style='width:145px'></div>\n");
-    html += F("<div class='sr'><div class='sl2'><b>Intervall</b><span>Sekunden zwischen automatischen Abrufen</span></div>\n");
-    html += F("<input type='number' class='si' id='frb-intvl' min='30' max='3600'> s</div>\n");
-    html += F("<div class='sr'><div class='sl2'><b>Status</b><span id='frb-status'>-</span></div>\n");
-    html += F("<button class='btn bq' onclick='fritzboxNow()' id='frb-now-btn'>&#128260; Jetzt abrufen</button></div>\n");
-    html += F("<div class='card' style='margin-top:10px;background:rgba(167,139,250,.06)'>\n");
-    html += F("<span style='font-size:11px;color:var(--mut)'>Benoetigt in der FritzBox unter <i>Heimnetz -&gt; Netzwerk -&gt; Netzwerkeinstellungen</i> die Option <i>Zugriff fuer Anwendungen zulassen / UPnP-Statusinformationen</i>. Falls die FritzBox einen Login verlangt, hier Benutzername/Kennwort eintragen (HTTP-Digest-Auth).</span>\n");
-    html += F("</div></div>\n");
-    html += F("<button class='btn bpr blg' onclick='saveSettings()'>&#128190; Speichern</button>\n");
-    html += F("<span id='cfg-saved' style='margin-left:10px;font-size:12px;color:var(--grn);display:none'>Gespeichert!</span>\n");
-    html += F("</div>\n");
-    // Status Pane
-    html += F("<div class='pane' id='pane-status'>\n");
-    html += F("<div class='card'><h3>ESP-Geraet</h3><table>\n");
-    html += F("<tr><td style='color:var(--mut);width:35%;padding:7px 10px'>Name</td><td style='padding:7px 10px' id='st-name'>-</td></tr>\n");
-    html += F("<tr><td style='color:var(--mut);padding:7px 10px'>Chip</td><td style='padding:7px 10px' id='st-chip'>-</td></tr>\n");
-    html += F("<tr><td style='color:var(--mut);padding:7px 10px'>MAC</td><td style='padding:7px 10px;font-family:var(--mono);color:var(--acc)' id='st-mac'>-</td></tr>\n");
-    html += F("<tr><td style='color:var(--mut);padding:7px 10px'>IP</td><td style='padding:7px 10px;font-family:var(--mono);color:var(--acc)' id='st-ip'>-</td></tr>\n");
-    html += F("<tr><td style='color:var(--mut);padding:7px 10px'>Uptime</td><td style='padding:7px 10px' id='st-up'>-</td></tr>\n");
-    html += F("<tr><td style='color:var(--mut);padding:7px 10px'>Freier Heap</td><td style='padding:7px 10px' id='st-heap'>-</td></tr>\n");
-    html += F("<tr><td style='color:var(--mut);padding:7px 10px'>Subnetz</td><td style='padding:7px 10px;font-family:var(--mono)' id='st-sub'>-</td></tr>\n");
-    html += F("<tr><td style='color:var(--mut);padding:7px 10px'>Ring-Scan IP</td><td style='padding:7px 10px;font-family:var(--mono)' id='st-rip'>-</td></tr>\n");
-    html += F("</table></div></div>\n");
-    html += F("<div class='toast' id='toast'></div>\n");
-    // JavaScript
-    webServer.sendContent(html); html = "";
-
-    // ── Chunk 3: JavaScript (erste Haelfte) ─────────────────────
-    html += F("<script>\n");
-    html += F("var devs=[],bootSec=0,expIp=null,sse=null,curFilter='all';\n");
-    html += F("var DN=['Unknown','Router','PC','ESP32','Phone','Drucker','TV','NAS','Kamera','Switch',\n");
-    html += F("  'Tablet','Speaker','SmartPlug','Vacuum','Bridge','Repeater'];\n");
-    html += F("var DE=['?','&#127760;','&#128421;','&#9889;','&#128241;','&#128424;','&#128250;','&#128190;','&#128247;','&#128256;',\n");
-    html += F("  '&#128242;','&#128266;','&#128268;','&#129302;','&#128279;','&#128246;'];\n");
-    html += F("var PN={21:'FTP',22:'SSH',23:'Telnet',25:'SMTP',53:'DNS',80:'HTTP',110:'POP3',139:'SMB',\n");
-    html += F("       143:'IMAP',443:'HTTPS',445:'SMB2',554:'RTSP',3389:'RDP',5000:'UPnP',5900:'VNC',\n");
-    html += F("       7547:'TR069',8080:'HTTP-Alt',8443:'HTTPS-Alt',8888:'Alt',9100:'Print'};\n");
-    html += F("var SP=[21,22,23,25,53,80,110,139,143,443,445,554,3389,5000,5900,7547,8080,8443,8888,9100];\n");
-    html += F("function toast(m,ms){var t=document.getElementById('toast');t.textContent=m;\n");
-    html += F("  t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(function(){t.classList.remove('show');},ms||2200);}\n");
-    html += F("function showTab(id,btn){\n");
-    html += F("  document.querySelectorAll('.pane').forEach(function(p){p.classList.remove('active')});\n");
-    html += F("  document.querySelectorAll('.tab').forEach(function(t){t.classList.remove('active')});\n");
-    html += F("  document.getElementById(id).classList.add('active');\n");
-    html += F("  if(btn)btn.classList.add('active');\n");
-    html += F("  if(id==='pane-events')loadEvents();\n");
-    html += F("  if(id==='pane-status')loadStatus();\n");
-    html += F("  if(id==='pane-settings')loadSettingsForm();\n");
-    html += F("}\n");
-    html += F("function eh(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}\n");
-    html += F("function fmtUp(s){if(!s)return'-';s=parseInt(s);if(s<60)return s+'s';\n");
-    html += F("  if(s<3600)return Math.floor(s/60)+'min';if(s<86400)return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'min';\n");
-    html += F("  return Math.floor(s/86400)+'d '+Math.floor((s%86400)/3600)+'h';}\n");
-    html += F("function pcls(ms){return ms<30?'ok':ms<150?'warn':'bad';}\n");
-    html += F("function fmtEvTime(t){\n");
-    html += F("  if(!t)return'-';\n");
-    html += F("  var d=new Date(t*1000);\n");
-    html += F("  if(d.getFullYear()<2020)return'-';\n");
-    html += F("  return d.toLocaleString('de-DE',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});\n");
-    html += F("}\n");
-    html += F("function setFilter(f){\n");
-    html += F("  curFilter=f;\n");
-    html += F("  document.querySelectorAll('.fbtn').forEach(function(b){b.classList.remove('act');});\n");
-    html += F("  document.getElementById('fb-'+f).classList.add('act');\n");
-    html += F("  renderAll();\n");
-    html += F("}\n");
-    html += F("function applyFilter(d){\n");
-    html += F("  var now=bootSec;\n");
-    html += F("  if(curFilter==='on') return d.active;\n");
-    html += F("  if(curFilter==='off') return !d.active;\n");
-    html += F("  // Neu = erstmals gesehen vor weniger als 24h.\n");
-    html += F("  // firstSeen ist formatierter String (5min, 2h 10min...).\n");
-    html += F("  // Heuristik: kein 'd' im String = juenger als 1 Tag.\n");
-    html += F("  if(curFilter==='new'){\n");
-    html += F("    if(!d.firstSeen||d.firstSeen==='-')return false;\n");
-    html += F("    return d.firstSeen.indexOf('d')<0;\n");
-    html += F("  }\n");
-    html += F("  return true;\n");
-    html += F("}\n");
-    html += F("function renderAll(){\n");
-    html += F("  var filtered=devs.filter(applyFilter);\n");
-    html += F("  var on=filtered.filter(function(d){return d.active;});\n");
-    html += F("  var off=filtered.filter(function(d){return !d.active;});\n");
-    html += F("  var tb=document.getElementById('net-tbody');\n");
-    html += F("  if(!filtered.length){tb.innerHTML='<tr><td colspan=\"6\" style=\"text-align:center;color:var(--mut);padding:28px\">Keine Eintraege</td></tr>';updateStats();return;}\n");
-    html += F("  var h='';\n");
-    html += F("  if(on.length){h+='<tr class=\"ssep\"><td colspan=\"6\">Online &#8212; '+on.length+' Geraet'+(on.length!==1?'e':'')+'</td></tr>';on.forEach(function(d){h+=devRow(d);});}\n");
-    html += F("  if(off.length){h+='<tr class=\"ssep\"><td colspan=\"6\">Offline &#8212; '+off.length+' Geraet'+(off.length!==1?'e':'')+'</td></tr>';off.forEach(function(d){h+=devRow(d);});}\n");
-    html += F("  tb.innerHTML=h;\n");
-    html += F("  if(expIp){var p=document.getElementById('ep-'+expIp.replace(/\\./g,'_'));if(p)p.classList.add('open');}\n");
-    html += F("  updateStats();\n");
-    html += F("}\n");
-    html += F("function devRow(d){\n");
-    html += F("  var k=d.ip.replace(/\\./g,'_'),dt=d.dtype||0;\n");
-    html += F("  var dn=d.label||d.hn||'-';\n");
-    html += F("  var sub=d.vendor||d.mac||'';\n");
-    html += F("  var upH='-';\n");
-    html += F("  if(d.active&&d.onlineSince!=='-')upH='<span class=\"uon\">&#11014; '+d.onlineSince+'</span>';\n");
-    html += F("  else if(!d.active&&d.offlineSince!=='-')upH='<span class=\"uof\">&#11015; '+d.offlineSince+'</span>';\n");
-    html += F("  else if(d.lastSeen!=='-')upH=d.lastSeen;\n");
-    html += F("  var vb=d.vendor?'<span class=\"vendor-badge\">'+eh(d.vendor)+'</span>':'';\n");
-    html += F("  var mr='<tr class=\"'+(d.active?'':'off-row')+'\">'\n");
-    html += F("    +'<td><div class=\"mri\" style=\"justify-content:center;padding:7px 3px\" onclick=\"toggleExp(\\''+k+'\\')\">';\n");
-    html += F("  mr+='<div class=\"di\" onclick=\"event.stopPropagation();openExp(\\''+k+'\\',false)\" title=\"Typ: '+DN[dt]+'\">'+DE[dt]+'</div></div></td>';\n");
-    html += F("  mr+='<td><div class=\"mri\" style=\"padding:7px 4px\" onclick=\"toggleExp(\\''+k+'\\')\">';\n");
-    html += F("  mr+='<span class=\"dot '+(d.active?'don':'dof')+'\"></span></div></td>';\n");
-    html += F("  mr+='<td><div class=\"mri\" onclick=\"toggleExp(\\''+k+'\\')\">';\n");
-    html += F("  mr+='<span class=\"ipv\">'+d.ip+'</span></div></td>';\n");
-    html += F("  mr+='<td><div class=\"mri\" onclick=\"toggleExp(\\''+k+'\\')\">';\n");
-    html += F("  mr+='<div class=\"inf\"><div class=\"inm\">'+eh(dn)+vb+'</div>';\n");
-    html += F("  mr+=(sub?'<div class=\"ins\">'+eh(sub)+'</div>':'')+'</div></div></td>';\n");
-    html += F("  mr+='<td><div class=\"upc\">'+upH+'</div></td>';\n");
-    html += F("  mr+='<td><div class=\"rac\">';\n");
-    html += F("  mr+='<button class=\"btn bp\" id=\"pb-'+k+'\" onclick=\"doPing(\\''+d.ip+'\\',\\''+k+'\\')\" title=\"Ping\">&#128246;</button>';\n");
-    html += F("  mr+='<button class=\"btn bq\" id=\"psb-'+k+'\" onclick=\"doPS(\\''+d.ip+'\\',\\''+k+'\\')\" title=\"Ports\">&#128269;</button>';\n");
-    html += F("  mr+='<button class=\"btn bx\" onclick=\"delDev(\\''+d.ip+'\\')\" title=\"Loeschen\">&#10005;</button>';\n");
-    html += F("  mr+='</div></td></tr>';\n");
-    // Expand row
-    html += F("  var pdI=d.active?'<div style=\"color:var(--mut);font-size:12px\">Ping starten &#8594;</div>':'<div style=\"color:var(--mut);font-size:12px\">Geraet offline</div>';\n");
-    html += F("  var er='<tr class=\"erow\"><td colspan=\"6\"><div class=\"epnl\" id=\"ep-'+k+'\">';\n");
-    html += F("  er+='<div class=\"egrid\">';\n");
-    html += F("  er+='<div>';\n");
-    html += F("  er+='<div class=\"fg\"><label>Name / Label</label><input class=\"fi\" id=\"lbl-'+k+'\" value=\"'+eh(d.label||'')+'\"></div>';\n");
-    html += F("  er+='<div class=\"fg\"><label>Notiz</label><textarea class=\"fi\" id=\"note-'+k+'\">'+eh(d.note||'')+'</textarea></div>';\n");
-    html += F("  er+='<div class=\"fg\"><label>Geraete-Typ</label><div class=\"dp\" id=\"dp-'+k+'\">'+buildDP(dt,k)+'</div></div>';\n");
-    html += F("  er+='<div class=\"fg\"><label>MAC / Vendor</label><div style=\"font-family:var(--mono);font-size:12px;color:var(--mut)\">'+eh(d.mac||'-')+(d.vendor?' &nbsp;<span style=\"color:var(--pur)\">'+eh(d.vendor)+'</span>':'')+'</div></div>';\n");
-    html += F("  er+='<button class=\"btn bs\" style=\"margin-top:6px\" onclick=\"saveDev(\\''+d.ip+'\\',\\''+k+'\\')\" >&#128190; Speichern</button>';\n");
-    html += F("  er+='</div>';\n");
-    html += F("  er+='<div>';\n");
-    html += F("  er+='<div class=\"fg\"><label>Ping-Analyse (3x TCP)</label><div id=\"pd-'+k+'\">'+pdI+'</div>';\n");
-    html += F("  er+='<button class=\"btn bp\" style=\"margin-top:7px\" id=\"pb2-'+k+'\" onclick=\"doPing(\\''+d.ip+'\\',\\''+k+'\\')\" >&#128246; Ping (3x)</button></div>';\n");
-    html += F("  er+='<div class=\"fg\" style=\"margin-top:11px\"><label>Port-Scanner</label>';\n");
-    html += F("  er+='<div id=\"pr-'+k+'\">'+buildPorts(d)+'</div>';\n");
-    html += F("  er+='<button class=\"btn bq\" style=\"margin-top:7px\" id=\"psb2-'+k+'\" onclick=\"doPS(\\''+d.ip+'\\',\\''+k+'\\')\" >&#128269; Ports scannen</button></div>';\n");
-    html += F("  er+='</div></div></div></td></tr>';\n");
-    html += F("  return mr+er;\n");
-    html += F("}\n");
-    html += F("function buildDP(sel,k){var h='';for(var i=0;i<DN.length;i++)h+='<div class=\"dopt'+(i===sel?' sel':'')+' \" data-v=\"'+i+'\" onclick=\"selDT(this,\\''+k+'\\')\" >'+DE[i]+' '+DN[i]+'</div>';return h;}\n");
-    html += F("function buildPorts(d){\n");
-    html += F("  if(!d.portsScanned)return'<div style=\"color:var(--mut);font-size:12px\">Noch nicht gescannt</div>';\n");
-    html += F("  var h='<div class=\"pchips\">';\n");
-    html += F("  for(var i=0;i<SP.length;i++){\n");
-    html += F("    var p=SP[i],open=(d.portBits>>i)&1,lbl=PN[p]||p;\n");
-    html += F("    if(open){\n");
-    html += F("      var lk=(p===80||p===443||p===8080||p===8443||p===5900||p===3389);\n");
-    html += F("      if(lk){var pr=p===443||p===8443?'https':'http',sfx=p!==80&&p!==443?':'+p:'';\n");
-    html += F("        h+='<a href=\"'+pr+'://'+d.ip+sfx+'\" target=\"_blank\" class=\"pco pco-o\">&#128275; '+p+' <small>'+lbl+'</small></a>';}\n");
-    html += F("      else h+='<span class=\"pco pco-o\">&#128275; '+p+' <small>'+lbl+'</small></span>';\n");
-    html += F("    }else h+='<span class=\"pco pco-c\">'+p+'</span>';\n");
-    html += F("  }\n");
-    html += F("  return h+'</div>';\n");
-    html += F("}\n");
-    html += F("function toggleExp(k){var p=document.getElementById('ep-'+k);if(!p)return;\n");
-    html += F("  var o=!p.classList.contains('open');\n");
-    html += F("  document.querySelectorAll('.epnl').forEach(function(x){x.classList.remove('open');});\n");
-    html += F("  expIp=null;if(o){p.classList.add('open');expIp=k.replace(/_/g,'.');}}\n");
-    html += F("function openExp(k,sc){\n");
-    html += F("  document.querySelectorAll('.epnl').forEach(function(x){x.classList.remove('open');});\n");
-    html += F("  var p=document.getElementById('ep-'+k);\n");
-    html += F("  if(p){p.classList.add('open');expIp=k.replace(/_/g,'.');if(sc)p.scrollIntoView({behavior:'smooth',block:'nearest'});}}\n");
-    html += F("function selDT(el,k){document.querySelectorAll('#dp-'+k+' .dopt').forEach(function(x){x.classList.remove('sel');});el.classList.add('sel');}\n");
-    html += F("function saveDev(ip,k){\n");
-    html += F("  var lbl=document.getElementById('lbl-'+k).value;\n");
-    html += F("  var note=document.getElementById('note-'+k).value;\n");
-    html += F("  var s=document.querySelector('#dp-'+k+' .sel');\n");
-    html += F("  fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},\n");
-    html += F("    body:JSON.stringify({ip:ip,label:lbl,note:note,dtype:s?parseInt(s.dataset.v):0})})\n");
-    html += F("    .then(function(r){return r.json();}).then(function(d){if(d.ok){toast('&#10003; Gespeichert');loadDevices();}});}\n");
-    webServer.sendContent(html); html = "";
-
-    // ── Chunk 4: JavaScript (zweite Haelfte) + Ende ─────────────
-    html += F("function delDev(ip){\n");
-    html += F("  if(!confirm('Geraet '+ip+' entfernen?'))return;\n");
-    html += F("  fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:ip})})\n");
-    html += F("    .then(function(r){return r.json();}).then(function(d){if(d.ok){toast('Entfernt');expIp=null;loadDevices();}});}\n");
-    html += F("function doPing(ip,k){\n");
-    html += F("  var b1=document.getElementById('pb-'+k),b2=document.getElementById('pb2-'+k);\n");
-    html += F("  [b1,b2].forEach(function(b){if(b){b.disabled=true;b.classList.add('spin');}});\n");
-    html += F("  fetch('/api/ping',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:ip})})\n");
-    html += F("    .then(function(r){return r.json();}).then(function(d){\n");
-    html += F("      [b1,b2].forEach(function(b){if(b){b.disabled=false;b.classList.remove('spin');}});\n");
-    html += F("      var pd=document.getElementById('pd-'+k);\n");
-    html += F("      if(pd){\n");
-    html += F("        if(!d.ok)pd.innerHTML='<div class=\"pbox\" style=\"border-color:rgba(255,77,106,.3)\"><div style=\"color:var(--red);text-align:center;padding:7px;font-size:12px\">100% Loss</div></div>';\n");
-    html += F("        else pd.innerHTML='<div class=\"pbox\"><div class=\"prow\">'\n");
-    html += F("          +'<div class=\"ps\"><div class=\"psv ok\">'+d.min+'</div><div class=\"psl\">Min ms</div></div>'\n");
-    html += F("          +'<div class=\"ps\"><div class=\"psv '+pcls(d.avg)+'\">'+d.avg+'</div><div class=\"psl\">Avg ms</div></div>'\n");
-    html += F("          +'<div class=\"ps\"><div class=\"psv warn\">'+d.max+'</div><div class=\"psl\">Max ms</div></div>'\n");
-    html += F("          +'<div class=\"ps\"><div class=\"psv '+(d.loss>0?'bad':'ok')+'\">'+d.loss+'%</div><div class=\"psl\">Loss</div></div>'\n");
-    html += F("          +'</div></div>';\n");
-    html += F("      }\n");
-    html += F("    });\n");
-    html += F("}\n");
-    html += F("function doPS(ip,k){\n");
-    html += F("  var b1=document.getElementById('psb-'+k),b2=document.getElementById('psb2-'+k);\n");
-    html += F("  [b1,b2].forEach(function(b){if(b){b.disabled=true;b.classList.add('spin');}});\n");
-    html += F("  var pr=document.getElementById('pr-'+k);\n");
-    html += F("  if(pr)pr.innerHTML='<div style=\"color:var(--mut);font-size:12px;font-style:italic\">Scanne 20 Ports...</div>';\n");
-    html += F("  openExp(k,true);\n");
-    html += F("  fetch('/api/portscan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip:ip})})\n");
-    html += F("    .then(function(r){return r.json();}).then(function(d){\n");
-    html += F("      [b1,b2].forEach(function(b){if(b){b.disabled=false;b.classList.remove('spin');}});\n");
-    html += F("      var bits=0;d.ports.forEach(function(p){var i=SP.indexOf(p);if(i>=0)bits|=(1<<i);});\n");
-    html += F("      var dev=devs.find(function(x){return x.ip===ip;});\n");
-    html += F("      if(dev){dev.portBits=bits;dev.portsScanned=true;}\n");
-    html += F("      if(pr&&dev)pr.innerHTML=buildPorts(dev);\n");
-    html += F("      toast('&#128269; '+d.ports.length+' offene Port'+(d.ports.length!==1?'e':'')+' auf '+ip);\n");
-    html += F("    }).catch(function(){\n");
-    html += F("      [b1,b2].forEach(function(b){if(b){b.disabled=false;b.classList.remove('spin');}});\n");
-    html += F("    });\n");
-    html += F("}\n");
-    html += F("function updateStats(){\n");
-    html += F("  var a=devs.filter(function(d){return d.active;}).length;\n");
-    html += F("  document.getElementById('s-total').textContent=devs.length;\n");
-    html += F("  document.getElementById('s-active').textContent=a;\n");
-    html += F("  document.getElementById('s-inactive').textContent=devs.length-a;\n");
-    html += F("  document.getElementById('tbl-cnt').textContent=devs.length+' Eintraege';\n");
-    html += F("}\n");
-    html += F("function loadDevices(){\n");
-    html += F("  fetch('/api/devices').then(function(r){return r.json();}).then(function(d){devs=d;renderAll();});\n");
-    html += F("}\n");
-    html += F("function loadEvents(){\n");
-    html += F("  fetch('/api/events').then(function(r){return r.json();}).then(function(ev){\n");
-    html += F("    var el=document.getElementById('ev-list');\n");
-    html += F("    if(!ev.length){el.innerHTML='<div style=\"color:var(--mut);padding:20px;text-align:center\">Noch keine Ereignisse</div>';return;}\n");
-    html += F("    var h='';\n");
-    html += F("    ev.forEach(function(e){\n");
-    html += F("      h+='<div class=\"evitem\">';\n");
-    html += F("      h+='<span class=\"ev-t\">'+fmtEvTime(e.t)+'</span>';\n");
-    html += F("      h+='<span class=\"ev-'+e.type+' \" style=\"min-width:60px;font-weight:700;font-size:11px\">'+e.type+'</span>';\n");
-    html += F("      h+='<span class=\"ev-ip\">'+eh(e.ip)+'</span>';\n");
-    html += F("      h+=(e.info?'<span class=\"ev-inf\">'+eh(e.info)+'</span>':'');\n");
-    html += F("      h+='</div>';\n");
-    html += F("    });\n");
-    html += F("    el.innerHTML=h;\n");
-    html += F("  });\n");
-    html += F("}\n");
-    html += F("function loadStatus(){\n");
-    html += F("  fetch('/api/status').then(function(r){return r.json();}).then(function(d){\n");
-    html += F("    document.getElementById('st-name').textContent=d.name||'-';\n");
-    html += F("    document.getElementById('st-chip').textContent=d.chip||'-';\n");
-    html += F("    document.getElementById('st-mac').textContent=d.mac||'-';\n");
-    html += F("    document.getElementById('st-ip').textContent=d.ip||'-';\n");
-    html += F("    document.getElementById('st-up').textContent=fmtUp(d.uptime);\n");
-    html += F("    document.getElementById('st-heap').textContent=Math.round(d.freeHeap/1024)+' KB';\n");
-    html += F("    document.getElementById('st-sub').textContent=d.subnet||'-';\n");
-    html += F("    document.getElementById('st-rip').textContent=d.subnet+'.'+d.ringIp;\n");
-    html += F("    document.getElementById('s-subnet').textContent=d.subnet||'-';\n");
-    html += F("    bootSec=d.uptime||0;\n");
-    html += F("  });\n");
-    html += F("}\n");
-    html += F("function loadSettingsForm(){\n");
-    html += F("  fetch('/api/settings').then(function(r){return r.json();}).then(function(d){\n");
-    html += F("    document.getElementById('cfg-to').value=d.timeout;\n");
-    html += F("    document.getElementById('cfg-sub').value=d.subnet||'';\n");
-    html += F("    document.getElementById('frb-en').checked=!!d.frbEnabled;\n");
-    html += F("    document.getElementById('frb-host').value=d.frbHost||'';\n");
-    html += F("    document.getElementById('frb-user').value=d.frbUser||'';\n");
-    html += F("    document.getElementById('frb-pass').placeholder=d.frbHasPass?'unveraendert (gesetzt)':'kein Passwort';\n");
-    html += F("    document.getElementById('frb-intvl').value=d.frbInterval||300;\n");
-    html += F("    var fst=(d.frbStatus||'-');\n");
-    html += F("    if(d.frbHttpCode)fst+=' [HTTP '+d.frbHttpCode+(d.frbAuthUsed?(', Digest '+(d.frbAuthOk?'OK':'fehlgeschlagen')):'')+']';\n");
-    html += F("    document.getElementById('frb-status').textContent=fst;\n");
-    html += F("  });\n");
-    html += F("}\n");
-    html += F("function saveSettings(){\n");
-    html += F("  var pass=document.getElementById('frb-pass').value;\n");
-    html += F("  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},\n");
-    html += F("    body:JSON.stringify({timeout:parseInt(document.getElementById('cfg-to').value)||200,\n");
-    html += F("      subnet:document.getElementById('cfg-sub').value.trim(),\n");
-    html += F("      frbEnabled:document.getElementById('frb-en').checked,\n");
-    html += F("      frbHost:document.getElementById('frb-host').value.trim(),\n");
-    html += F("      frbUser:document.getElementById('frb-user').value.trim(),\n");
-    html += F("      frbPass:pass,\n");
-    html += F("      frbInterval:parseInt(document.getElementById('frb-intvl').value)||300})})\n");
-    html += F("    .then(function(r){return r.json();}).then(function(d){\n");
-    html += F("      if(d.ok){\n");
-    html += F("        var s=document.getElementById('cfg-saved');s.style.display='inline';\n");
-    html += F("        setTimeout(function(){s.style.display='none';},2000);\n");
-    html += F("        document.getElementById('frb-pass').value='';\n");
-    html += F("        loadSettingsForm();\n");
-    html += F("      }\n");
-    html += F("    });\n");
-    html += F("}\n");
-    html += F("function fritzboxNow(){\n");
-    html += F("  var b=document.getElementById('frb-now-btn');b.disabled=true;b.classList.add('spin');\n");
-    html += F("  fetch('/api/fritzbox-now',{method:'POST'}).then(function(r){return r.json();}).then(function(d){\n");
-    html += F("    b.disabled=false;b.classList.remove('spin');\n");
-    html += F("    if(d.ok){toast('FritzBox: '+d.status);loadSettingsForm();loadDevices();}\n");
-    html += F("    else toast('FritzBox-Integration ist deaktiviert');\n");
-    html += F("  }).catch(function(){b.disabled=false;b.classList.remove('spin');});\n");
-    html += F("}\n");
-    // SSE
-    html += F("function connectSse(){\n");
-    html += F("  if(sse){try{sse.close();}catch(e){}}\n");
-    html += F("  sse=new EventSource('/api/sse');\n");
-    html += F("  sse.addEventListener('device',function(e){\n");
-    html += F("    var d=JSON.parse(e.data);\n");
-    html += F("    var i=devs.findIndex(function(x){return x.ip===d.ip;});\n");
-    html += F("    if(i>=0){Object.assign(devs[i],d);}else{devs.push(d);}\n");
-    html += F("    renderAll();\n");
-    html += F("  });\n");
-    html += F("  sse.addEventListener('event',function(e){\n");
-    html += F("    if(document.getElementById('pane-events').classList.contains('active'))loadEvents();\n");
-    html += F("  });\n");
-    html += F("  sse.onerror=function(){setTimeout(connectSse,4000);};\n");
-    html += F("}\n");
-    // Ring progress
-    html += F("function updateRing(){\n");
-    html += F("  fetch('/api/status').then(function(r){return r.json();}).then(function(d){\n");
-    html += F("    var pct=Math.round((d.ringIp-1)/254*100);\n");
-    html += F("    document.getElementById('ring-fill').style.width=pct+'%';\n");
-    html += F("    document.getElementById('ring-status').textContent='Ring: .'+d.ringIp;\n");
-    html += F("    bootSec=d.uptime||bootSec;\n");
-    html += F("    document.getElementById('s-subnet').textContent=d.subnet||'-';\n");
-    html += F("    document.getElementById('s-active').textContent=d.online;\n");
-    html += F("    document.getElementById('s-inactive').textContent=d.devices-d.online;\n");
-    html += F("    document.getElementById('s-total').textContent=d.devices;\n");
-    html += F("    document.getElementById('tbl-cnt').textContent=d.devices+' Eintraege';\n");
-    html += F("    if(d.rlog&&d.rlog.length){\n");
-    html += F("      var rl=document.getElementById('rlog');if(rl){\n");
-    html += F("        rl.innerHTML=d.rlog.map(function(e){\n");
-    html += F("          var c=e.ok?'color:var(--grn)':'color:var(--mut)';\n");
-    html += F("          return '<span style=\"' + c + '\">' + e.ip + '</span> ' + '<span style=\"color:var(--acc)\">' + e.ms + 'ms</span> ' + '<span style=\"color:var(--mut)\">' + e.info + '</span>';\n");
-    html += F("        }).join(' &nbsp;|&nbsp; ');\n");
-    html += F("      }\n");
-    html += F("    }\n");
-    html += F("  }).catch(function(){});\n");
-    html += F("}\n");
-    // Init
-    html += F("loadDevices();\n");
-    html += F("loadStatus();\n");
-    html += F("connectSse();\n");
-    html += F("setInterval(updateRing,3000);\n");
-    html += F("setInterval(function(){\n");
-    html += F("  if(document.getElementById('pane-status').classList.contains('active'))loadStatus();\n");
-    html += F("},8000);\n");
-    html += F("</script></body></html>\n");
-    webServer.sendContent(html);
-    webServer.sendContent("");  // flush / end chunked response
+    webServer.sendHeader(F("Content-Encoding"), F("gzip"));
+    webServer.sendHeader(F("Cache-Control"), F("no-store"));
+    webServer.send_P(200, "text/html", (PGM_P)PAGE_MAIN_GZ, PAGE_MAIN_GZ_LEN);
 }
 
-
-// ================================================================
-//  OTA SEITE
-// ================================================================
 void handleOtaPage() {
-    String h; h.reserve(3000);
-    h += F("<!DOCTYPE html><html lang='de'><head><meta charset='UTF-8'>\n");
-    h += F("<meta name='viewport' content='width=device-width,initial-scale=1'>\n");
-    h += F("<title>OTA</title><style>\n");
-    h += F("*{box-sizing:border-box;margin:0;padding:0}body{background:#07090f;color:#dde6f0;font-family:sans-serif;font-size:14px}\n");
-    h += F("header{background:#0d1422;border-bottom:1px solid #1a2d47;padding:14px 20px}\n");
-    h += F("h1{font-size:18px;color:#00c8ff}\n");
-    h += F(".tabs{display:flex;background:#0d1422;border-bottom:1px solid #1a2d47;padding:0 20px}\n");
-    h += F(".tab{padding:10px 20px;color:#4a6380;text-decoration:none;font-weight:600;border-bottom:2px solid transparent}\n");
-    h += F(".tab.a,.tab:hover{color:#00c8ff;border-bottom-color:#00c8ff}\n");
-    h += F(".c{padding:20px;max-width:700px}.k{background:#0d1422;border:1px solid #1a2d47;border-radius:8px;padding:20px;margin-bottom:14px}\n");
-    h += F(".k h3{font-size:11px;color:#4a6380;text-transform:uppercase;letter-spacing:.5px;margin-bottom:16px}\n");
-    h += F(".drop{border:2px dashed #1a2d47;border-radius:8px;padding:32px;text-align:center;cursor:pointer;color:#4a6380}\n");
-    h += F(".drop:hover{border-color:#00c8ff;color:#dde6f0}input[type=file]{display:none}\n");
-    h += F(".btn{background:#00c8ff;color:#000;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:700;margin-top:14px;width:100%}\n");
-    h += F(".bar{height:8px;background:#1a2d47;border-radius:4px;overflow:hidden;margin-top:12px}\n");
-    h += F(".bf{height:100%;background:#00c8ff;border-radius:4px;width:0%;transition:width .3s}\n");
-    h += F(".msg{margin-top:10px;font-size:13px;color:#4a6380;text-align:center}\n");
-    h += F(".w{background:rgba(255,200,68,.08);border:1px solid rgba(255,200,68,.25);border-radius:6px;padding:12px;color:#ffc844;font-size:13px;margin-bottom:14px}\n");
-    h += F("</style></head><body>\n");
-    h += F("<header><h1>&#128225; Network Scanner</h1></header>\n");
-    h += F("<div class='tabs'><a class='tab' href='/'>&#127760; Netzwerk</a><a class='tab a' href='/ota'>&#128640; OTA</a></div>\n");
-    h += F("<div class='c'><div class='k'><h3>Firmware hochladen</h3>\n");
-    h += F("<div class='w'>&#9888; ESP startet nach dem Flash automatisch neu.</div>\n");
-    h += F("<div class='drop' id='drop' onclick='document.getElementById(\"fw\").click()'>&#128193; <b>.bin</b> ablegen oder klicken</div>\n");
-    h += F("<input type='file' id='fw' accept='.bin'>\n");
-    h += F("<div id='fn' style='margin-top:8px;font-size:12px;color:#4a6380;text-align:center'></div>\n");
-    h += F("<button class='btn' onclick='go()'>&#9889; Flashen</button>\n");
-    h += F("<div id='prog' style='display:none'><div class='bar'><div class='bf' id='bar'></div></div><div class='msg' id='msg'>...</div></div>\n");
-    h += F("</div></div>\n");
-    h += F("<script>\n");
-    h += F("var inp=document.getElementById('fw'),drop=document.getElementById('drop');\n");
-    h += F("inp.onchange=function(){if(inp.files[0])document.getElementById('fn').textContent=inp.files[0].name+' ('+Math.round(inp.files[0].size/1024)+' KB)';};\n");
-    h += F("drop.ondragover=function(e){e.preventDefault();drop.style.borderColor='#00c8ff';};\n");
-    h += F("drop.ondragleave=function(){drop.style.borderColor='#1a2d47';};\n");
-    h += F("drop.ondrop=function(e){e.preventDefault();drop.style.borderColor='#1a2d47';\n");
-    h += F("  var f=e.dataTransfer.files[0];if(f&&f.name.endsWith('.bin')){\n");
-    h += F("    var dt=new DataTransfer();dt.items.add(f);inp.files=dt.files;\n");
-    h += F("    document.getElementById('fn').textContent=f.name+' ('+Math.round(f.size/1024)+' KB)';}};\n");
-    h += F("function go(){if(!inp.files[0]){alert('Bitte .bin auswaehlen!');return;}\n");
-    h += F("  var fd=new FormData();fd.append('firmware',inp.files[0]);\n");
-    h += F("  var xhr=new XMLHttpRequest();xhr.open('POST','/ota-upload');\n");
-    h += F("  document.getElementById('prog').style.display='block';\n");
-    h += F("  xhr.upload.onprogress=function(e){if(e.lengthComputable){\n");
-    h += F("    var p=Math.round(e.loaded/e.total*100);\n");
-    h += F("    document.getElementById('bar').style.width=p+'%';\n");
-    h += F("    document.getElementById('msg').textContent='Hochladen: '+p+'%';}};\n");
-    h += F("  xhr.onload=function(){if(xhr.status===200){\n");
-    h += F("    document.getElementById('bar').style.width='100%';\n");
-    h += F("    document.getElementById('bar').style.background='#20d68a';\n");
-    h += F("    document.getElementById('msg').textContent='OK - ESP startet neu...';\n");
-    h += F("  }else{document.getElementById('msg').textContent='Fehler: '+xhr.responseText;\n");
-    h += F("    document.getElementById('bar').style.background='#ff4d6a';}};\n");
-    h += F("  xhr.send(fd);\n");
-    h += F("}\n");
-    h += F("</script></body></html>\n");
-    webServer.send(200, "text/html", h);
+    webServer.sendHeader(F("Content-Encoding"), F("gzip"));
+    webServer.sendHeader(F("Cache-Control"), F("no-store"));
+    webServer.send_P(200, "text/html", (PGM_P)PAGE_OTA_GZ, PAGE_OTA_GZ_LEN);
 }
 
 void handleOtaUpload() {
@@ -2468,13 +1868,20 @@ String buildHeartbeat() {
     doc["mac"]        = getMac();
     doc["name"]       = deviceName;
     doc["hwType"]     = "esp32";
-    doc["chipModel"]  = ESP.getChipModel();
+    doc["chipModel"]  = hwInfo.chipModel();
     doc["version"]    = FW_VERSION;
     doc["ip"]         = getLocalIp();
     doc["rssi"]       = WiFi.RSSI();
     doc["uptime"]     = millis()/1000UL;
-    doc["freeHeap"]   = ESP.getFreeHeap();
-    doc["freeSketch"] = ESP.getFreeSketchSpace();
+    doc["freeHeap"]   = hwInfo.freeHeap();
+    doc["freeSketch"] = hwInfo.freeSketchSpace();
+    doc["hwSummary"]  = hwInfo.summaryLine();
+    doc["module"]     = hwInfo.moduleGuess();
+    {
+        const int c0 = CpuLoad::core0Percent();
+        const int c1 = CpuLoad::core1Percent();
+        doc["cpu"] = (c1 >= 0) ? ((c0 + c1) / 2) : c0;
+    }
     int active=0; for(int i=0;i<devCount;i++) if(devs[i].active) active++;
     #if ARDUINOJSON_VERSION_MAJOR>=7
       JsonObject ios=doc["ios"].to<JsonObject>();
@@ -2512,9 +1919,11 @@ void sendHeartbeat() {
             }
             if(resp.containsKey("name")&&!resp["name"].isNull()){
                 String newName=resp["name"].as<String>();
+                newName.trim();
                 if(newName.length()>0&&newName!=deviceName){
                     deviceName=newName;
                     prefs.begin("esphub",false); prefs.putString("name",deviceName); prefs.end();
+                    Serial.println("[HB] Name: "+deviceName);
                 }
             }
         }
@@ -2564,6 +1973,9 @@ void setup() {
     delay(500);
     Serial.println("\n=== ESP Network Scanner v" FW_VERSION " ===");
     Serial.println("[BOOT] Reset-Reason: " + resetReasonStr());
+    hwInfo.probe();
+    hwInfo.logToSerial();
+    CpuLoad::begin();
     checkResetButton();
     loadSettings();
     setupWifi();
@@ -2596,6 +2008,7 @@ void setup() {
 
 void loop() {
     webServer.handleClient();
+    CpuLoad::poll();
     unsigned long now=millis();
 
     // Ring-Scan: 1 IP pro Tick, Abstand mind. 50ms.
