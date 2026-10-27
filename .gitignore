@@ -1,0 +1,5 @@
+# Arduino / arduino-cli local build trees
+build/
+**/build/
+*.elf
+*.map
